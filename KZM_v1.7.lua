@@ -794,15 +794,16 @@ makeToggle(mainS, "No Parkour Cooldown", false, function(state)
 end)
 
 -- ==========================================
--- FLY FEATURE
+-- FLY FEATURE (Mobile + PC compatible)
+-- Movement: joystick MoveDirection mapped through camera yaw
+-- No BodyGyro (causes spinning on mobile)
+-- Space/jump button = rise, crouch button = descend
 -- ==========================================
-local FLY_SPEED   = 50
-local flyActive   = false
-local flyConn     = nil
+local FLY_SPEED    = 50
+local flyActive    = false
+local flyConn      = nil
 local flyAnimTrack = nil
-
--- Animation IDs for flying pose (standard Roblox float anims)
-local FLY_ANIM_ID = "rbxassetid://616006778"   -- hover/float animation
+local FLY_ANIM_ID  = "rbxassetid://616006778"
 
 local function startFly()
     if flyActive then return end
@@ -814,13 +815,11 @@ local function startFly()
 
     flyActive = true
 
-    -- Disable humanoid state so the game stops fighting us with gravity
-    hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
-    hum:SetStateEnabled(Enum.HumanoidStateType.Landed,   false)
-    hum:SetStateEnabled(Enum.HumanoidStateType.Jumping,  false)
-    hum:ChangeState(Enum.HumanoidStateType.Physics)
+    -- Let humanoid keep running normally but override gravity with BV
+    -- Do NOT change HumanoidState — JJS fights it and causes spinning
+    hum.AutoRotate = false   -- stop auto-rotate so we control facing
 
-    -- Play fly/hover animation through Animator (correct modern API)
+    -- Play hover animation via Animator
     pcall(function()
         local animator = hum:FindFirstChildOfClass("Animator")
         if animator then
@@ -832,65 +831,66 @@ local function startFly()
         end
     end)
 
-    -- BodyVelocity keeps us airborne and moving
+    -- Single BodyVelocity — handles all 3 axes, no BodyGyro needed
     local bv = Instance.new("BodyVelocity")
-    bv.Name      = "FlyBV"
-    bv.MaxForce  = Vector3.new(1e5, 1e5, 1e5)
-    bv.Velocity  = Vector3.zero
-    bv.Parent    = hrp
-
-    -- BodyGyro keeps character upright / facing direction
-    local bg = Instance.new("BodyGyro")
-    bg.Name      = "FlyBG"
-    bg.MaxTorque = Vector3.new(0, 1e5, 0)  -- yaw only, no pitch roll
-    bg.P         = 1e4
-    bg.D         = 400
-    bg.CFrame    = hrp.CFrame
-    bg.Parent    = hrp
+    bv.Name     = "FlyBV"
+    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    bv.Velocity = Vector3.zero
+    bv.Parent   = hrp
 
     flyConn = RunService.Heartbeat:Connect(function()
         local c = LocalPlayer.Character
         if not c then return end
         local root = c:FindFirstChild("HumanoidRootPart")
-        if not root then return end
+        local h    = c:FindFirstChildOfClass("Humanoid")
+        if not root or not h then return end
         local fbv = root:FindFirstChild("FlyBV")
-        local fbg = root:FindFirstChild("FlyBG")
-        if not fbv or not fbg then return end
+        if not fbv then return end
 
-        local cam     = workspace.CurrentCamera
-        local camCF   = cam.CFrame
-        local moveDir = Vector3.zero
+        local cam    = workspace.CurrentCamera
+        -- Camera yaw only (ignore pitch so we don't fly into the ground)
+        local camYaw = CFrame.Angles(0, math.atan2(
+            -cam.CFrame.LookVector.X,
+            -cam.CFrame.LookVector.Z
+        ), 0)
 
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-            moveDir = moveDir + camCF.LookVector
+        -- MoveDirection comes from the joystick on mobile or WASD on PC
+        local md       = h.MoveDirection  -- world-space, already normalised
+        local moveDir  = Vector3.zero
+
+        if md.Magnitude > 0.1 then
+            -- Project joystick/WASD into the camera's yaw frame
+            local local2world = camYaw
+            moveDir = local2world * Vector3.new(md.X, 0, md.Z)
+            moveDir = Vector3.new(moveDir.X, 0, moveDir.Z)
         end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-            moveDir = moveDir - camCF.LookVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-            moveDir = moveDir - camCF.RightVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-            moveDir = moveDir + camCF.RightVector
-        end
+
+        -- Vertical: keyboard Space/E or jump state
+        local vertDir = 0
         if UserInputService:IsKeyDown(Enum.KeyCode.Space)
         or UserInputService:IsKeyDown(Enum.KeyCode.Q) then
-            moveDir = moveDir + Vector3.new(0, 1, 0)
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+            vertDir = 1
+        elseif UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
         or UserInputService:IsKeyDown(Enum.KeyCode.E) then
-            moveDir = moveDir - Vector3.new(0, 1, 0)
+            vertDir = -1
+        end
+        -- On mobile detect jump button via humanoid state
+        if h:GetState() == Enum.HumanoidStateType.Jumping then
+            vertDir = 1
         end
 
-        if moveDir.Magnitude > 0 then
-            fbv.Velocity = moveDir.Unit * FLY_SPEED
-            local flatDir = Vector3.new(moveDir.X, 0, moveDir.Z)
-            if flatDir.Magnitude > 0.1 then
-                fbg.CFrame = CFrame.new(root.Position, root.Position + flatDir)
+        local finalDir = moveDir + Vector3.new(0, vertDir, 0)
+
+        if finalDir.Magnitude > 0 then
+            fbv.Velocity = finalDir.Unit * FLY_SPEED
+            -- Face the direction of horizontal movement (no spinning)
+            if moveDir.Magnitude > 0.1 then
+                root.CFrame = CFrame.new(root.Position,
+                    root.Position + moveDir)
+                    * CFrame.Angles(0, 0, 0)
             end
         else
-            -- Hover: kill velocity so gravity can't pull us down
-            fbv.Velocity = Vector3.zero
+            fbv.Velocity = Vector3.zero  -- hover
         end
     end)
 end
@@ -911,22 +911,16 @@ local function stopFly()
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if hrp then
             local fbv = hrp:FindFirstChild("FlyBV")
-            local fbg = hrp:FindFirstChild("FlyBG")
             if fbv then fbv:Destroy() end
-            if fbg then fbg:Destroy() end
         end
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum then
-            -- Re-enable all states we disabled
-            hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
-            hum:SetStateEnabled(Enum.HumanoidStateType.Landed,   true)
-            hum:SetStateEnabled(Enum.HumanoidStateType.Jumping,  true)
-            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            hum.AutoRotate = true
         end
     end
 end
 
--- Clean up fly on respawn
+-- Clean up on respawn
 LocalPlayer.CharacterAdded:Connect(function()
     flyActive    = false
     flyConn      = nil
@@ -2093,4 +2087,4 @@ end)
 -- ==========================================
 switchTab("Main")
 
-print("✅ ｢KZM」 v1.7 – Fly rewritten, hookmetamethod M1")
+print("✅ ｢KZM」 v1.8 – Mobile fly fixed")
